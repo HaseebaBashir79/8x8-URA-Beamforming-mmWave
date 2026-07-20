@@ -1,0 +1,287 @@
+clear; 
+clc; 
+close all;
+
+%% ===================== 1. SYSTEM PARAMETERS =============================
+fc = 28e9;                              
+c = physconst('LightSpeed');
+lambda = c/fc;                          
+d = lambda/2;                            % Half-wavelength spacing
+Nx = 8; Ny = 8;                         
+N = Nx*Ny;                              
+
+az_steer = 30;                          
+el_steer = 20;                          
+
+fprintf('Wavelength = %.4f mm\n', lambda*1e3);
+fprintf('Element spacing = %.4f mm (%.2f lambda)\n', d*1000, d/lambda);
+
+%% ===================== 2. ANTENNA ELEMENT (Manual Definition) ============
+element_response = @(az, el) ones(size(az));  % Isotropic response
+fprintf('Using manually defined isotropic element\n');
+
+%% ===================== 3. CREATE 8x8 URA ARRAY (Manual) =================
+fprintf('\n--- Creating 8x8 Array ---\n');
+
+[x_pos, y_pos] = meshgrid(0:Nx-1, 0:Ny-1);
+x_pos = x_pos*d - (Nx-1)*d/2;  % Center the array
+y_pos = y_pos*d - (Ny-1)*d/2;
+
+element_positions = [x_pos(:)'; y_pos(:)'; zeros(1, N)];
+
+fprintf('Array created successfully!\n');
+fprintf('Number of elements: %d\n', N);
+fprintf('Array aperture: %.2f mm x %.2f mm\n', (Nx-1)*d*1000, (Ny-1)*d*1000);
+
+%% ===================== 4. VISUALIZE ARRAY GEOMETRY =====================
+figure('Name', 'Array Geometry', 'Position', [100, 100, 700, 600]);
+
+plot(x_pos(:), y_pos(:), 'bo', 'MarkerFaceColor', 'b', 'MarkerSize', 8);
+axis equal;
+grid on;
+xlabel('X (meters)');
+ylabel('Y (meters)');
+title(sprintf('8x8 Planar Array (%d elements)', N));
+
+for k = 1:length(x_pos(:))
+    text(x_pos(k), y_pos(k), num2str(k), 'FontSize', 7, ...
+         'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom');
+end
+
+xlim([-Nx*d/2 - 0.003, Nx*d/2 + 0.003]);
+ylim([-Ny*d/2 - 0.003, Ny*d/2 + 0.003]);
+annotation('textbox', [0.15, 0.8, 0.3, 0.1], ...
+           'String', sprintf('Aperture Size:\nX = %.1f mm\nY = %.1f mm', (Nx-1)*d*1000, (Ny-1)*d*1000), ...
+           'FontSize', 10, 'BackgroundColor', 'white', 'EdgeColor', 'black');
+
+%% ===================== 5. STEERING VECTOR & WEIGHTS =====================
+% Defined as an ANONYMOUS FUNCTION (not a local function) so it works on
+% older MATLAB versions (e.g. R2017) without the "function must be at
+% end of file" restriction. k_wave = 2*pi/lambda is computed once.
+
+k_wave = 2*pi/lambda;
+compute_steering_vector = @(pos, az, el) exp(1j * k_wave * ...
+    ( pos(1,:)' * (sind(az).*cosd(el)) + ...
+      pos(2,:)' * sind(el) + ...
+      pos(3,:)' * (cosd(az).*cosd(el)) ));
+
+% Compute steering vector for desired direction
+a_steer = compute_steering_vector(element_positions, az_steer, el_steer);
+w = a_steer / norm(a_steer);  % Normalize weights
+
+fprintf('\nBeamforming Weights (First 10 shown):\n');
+disp(w(1:10));
+
+figure('Name', 'Beamforming Weights');
+subplot(2,1,1)
+stem(abs(w), 'filled')
+title('Beamforming Weights Magnitude')
+xlabel('Element Index'); ylabel('|w|')
+grid on;
+
+subplot(2,1,2)
+stem(angle(w)*180/pi, 'filled')
+title('Beamforming Weights Phase (Degrees)')
+xlabel('Element Index'); ylabel('Phase (deg)')
+grid on;
+
+%% ===================== 6. SIGNAL SIMULATION ==============================
+fs = 100e6;                             
+t = (0:1/fs:2e-6).';                    
+Ns = length(t);
+
+f_sig = 5e6;
+s = exp(1j*2*pi*f_sig*t);
+
+x = zeros(N, Ns);
+a = compute_steering_vector(element_positions, az_steer, el_steer);
+
+for k = 1:Ns
+    x(:,k) = a * s(k);
+end
+
+% Add noise
+noise_power = 0.1;
+noise = noise_power * (randn(size(x)) + 1j*randn(size(x))) / sqrt(2);
+x = x + noise;
+
+% Apply beamforming weights
+y = w' * x;
+
+%% ===================== 7. POWER COMPARISON ===============================
+P_before = mean(abs(x(1,:)).^2);
+P_after  = mean(abs(y).^2);
+
+fprintf('\n--- Power Comparison ---\n');
+fprintf('Signal Power (Single Element)  = %.4f\n', P_before);
+fprintf('Signal Power (After Beamforming)= %.4f\n', P_after);
+fprintf('Beamforming Gain (dB) = %.2f\n', 10*log10(P_after/P_before));
+
+%% ===================== 8. RADIATION PATTERNS =============================
+az_scan = -180:2:180;
+el_scan = -90:2:90;
+
+AF_dB = zeros(length(el_scan), length(az_scan));
+
+fprintf('\nComputing radiation patterns...\n');
+for i = 1:length(el_scan)
+    for j = 1:length(az_scan)
+        a_scan = compute_steering_vector(element_positions, az_scan(j), el_scan(i));
+        AF = abs(w' * a_scan);
+        AF_dB(i,j) = 20*log10(AF + eps);
+    end
+end
+fprintf('Pattern computation complete!\n');
+
+[~, az_idx] = min(abs(az_scan - az_steer));
+[~, el_idx] = min(abs(el_scan - el_steer));
+
+AF_el_cut = AF_dB(:,az_idx);
+AF_az_cut = AF_dB(el_idx,:);
+
+figure('Name', 'Radiation Patterns', 'Position', [100, 100, 1200, 900])
+
+subplot(2,2,1)
+plot(az_scan, AF_az_cut, 'b', 'LineWidth', 2);
+hold on;
+plot([az_steer az_steer], [min(AF_az_cut) max(AF_az_cut)], 'r--', 'LineWidth', 1.5);
+hold off;
+grid on;
+xlabel('Azimuth (deg)');
+ylabel('Array Factor (dB)');
+title(sprintf('Azimuth Cut at Elevation = %.1f deg', el_steer));
+xlim([-180 180]);
+ylim([min(AF_az_cut)-5 max(AF_az_cut)+5]);
+legend('Array Factor', sprintf('Steered: %.1f deg', az_steer), 'Location', 'best');
+
+subplot(2,2,2)
+plot(el_scan, AF_el_cut, 'g', 'LineWidth', 2);
+hold on;
+plot([el_steer el_steer], [min(AF_el_cut) max(AF_el_cut)], 'r--', 'LineWidth', 1.5);
+hold off;
+grid on;
+xlabel('Elevation (deg)');
+ylabel('Array Factor (dB)');
+title(sprintf('Elevation Cut at Azimuth = %.1f deg', az_steer));
+xlim([-90 90]);
+ylim([min(AF_el_cut)-5 max(AF_el_cut)+5]);
+legend('Array Factor', sprintf('Steered: %.1f deg', el_steer), 'Location', 'best');
+
+subplot(2,2,3)
+imagesc(az_scan, el_scan, AF_dB);
+axis xy;
+colorbar;
+xlabel('Azimuth (deg)');
+ylabel('Elevation (deg)');
+title('2D Array Factor Pattern (dB)');
+hold on;
+plot(az_steer, el_steer, 'r*', 'MarkerSize', 10, 'LineWidth', 2);
+hold off;
+
+subplot(2,2,4)
+AF_az_norm = AF_az_cut - max(AF_az_cut);
+AF_az_norm(AF_az_norm < -40) = -40;
+polarplot(deg2rad(az_scan), AF_az_norm, 'b', 'LineWidth', 2);
+title('Azimuth Pattern (Polar)');
+rlim([-40 0]);
+grid on;
+
+%% ===================== 9. PERFORMANCE ANALYSIS ===========================
+
+AF_norm = 10.^(AF_dB/10);
+AF_norm = AF_norm / max(AF_norm(:));
+D = 10*log10(AF_norm);
+
+[maxD, idx_max] = max(D(:));
+[row_max, col_max] = ind2sub(size(D), idx_max);
+mainLobeAz = az_scan(col_max);
+mainLobeEl = el_scan(row_max);
+
+D_az = D(row_max,:);
+halfPower = maxD - 3;
+indices = find(D_az >= halfPower);
+if length(indices) >= 2
+    beamwidth_az = az_scan(indices(end)) - az_scan(indices(1));
+else
+    beamwidth_az = NaN;
+end
+
+D_el = D(:,col_max);
+indices_el = find(D_el >= halfPower);
+if length(indices_el) >= 2
+    beamwidth_el = el_scan(indices_el(end)) - el_scan(indices_el(1));
+else
+    beamwidth_el = NaN;
+end
+
+[pks_az, locs_az] = findpeaks(D_az);
+if length(pks_az) >= 2
+    pks_sorted = sort(pks_az, 'descend');
+    SLL_az = pks_sorted(2);
+else
+    SLL_az = NaN;
+end
+
+[pks_el, locs_el] = findpeaks(D_el);
+if length(pks_el) >= 2
+    pks_sorted_el = sort(pks_el, 'descend');
+    SLL_el = pks_sorted_el(2);
+else
+    SLL_el = NaN;
+end
+
+steering_error_az = abs(mainLobeAz - az_steer);
+steering_error_el = abs(mainLobeEl - el_steer);
+
+fprintf('\n========== PERFORMANCE ANALYSIS ==========\n');
+fprintf('Maximum Directivity = %.2f dBi\n', maxD);
+fprintf('Main Lobe Direction  = Az: %.2f deg, El: %.2f deg\n', mainLobeAz, mainLobeEl);
+fprintf('3-dB Beamwidth       = Az: %.2f deg, El: %.2f deg\n', beamwidth_az, beamwidth_el);
+fprintf('Side Lobe Level      = Az: %.2f dBi, El: %.2f dBi\n', SLL_az, SLL_el);
+fprintf('Steering Error       = Az: %.2f deg, El: %.2f deg\n', steering_error_az, steering_error_el);
+fprintf('==========================================\n');
+
+%% ===================== 10. TIME DOMAIN SIGNAL PLOT =====================
+figure('Name', 'Signal Comparison');
+plot(t*1e6, real(x(1,:)), '--', 'LineWidth', 1);
+hold on;
+plot(t*1e6, real(y), 'b', 'LineWidth', 1.5);
+hold off;
+xlabel('Time (us)');
+ylabel('Amplitude');
+title('Signal Before and After Beamforming');
+legend('Single Element', 'After Beamforming', 'Location', 'best');
+grid on;
+xlim([0 2]);
+
+%% ===================== 11. BEAMFORMING GAIN VS ANGLE ====================
+figure('Name', 'Beamforming Gain');
+subplot(2,1,1)
+plot(az_scan, D(row_max,:), 'b', 'LineWidth', 2);
+grid on;
+xlabel('Azimuth Angle (deg)');
+ylabel('Directivity (dBi)');
+title('Beam Pattern - Azimuth Cut');
+xlim([-180 180]);
+ylim([min(D(row_max,:))-2 max(D(row_max,:))+2]);
+hold on;
+plot([az_steer az_steer], ylim, 'r--', 'LineWidth', 1);
+hold off;
+
+subplot(2,1,2)
+plot(el_scan, D(:,col_max), 'g', 'LineWidth', 2);
+grid on;
+xlabel('Elevation Angle (deg)');
+ylabel('Directivity (dBi)');
+title('Beam Pattern - Elevation Cut');
+xlim([-90 90]);
+ylim([min(D(:,col_max))-2 max(D(:,col_max))+2]);
+hold on;
+plot([el_steer el_steer], ylim, 'r--', 'LineWidth', 1);
+hold off;
+
+fprintf('\nSimulation completed successfully!\n');
+
+16  
+
+
